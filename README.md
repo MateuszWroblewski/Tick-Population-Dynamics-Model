@@ -1,0 +1,1 @@
+This is a simple tick population dynamics model I developed as a part of my master's thesis. It was written under the supervision of Mr Christoph Sticha Kaiser, Prof. Christina Kuttler and Prof. Noemi Castelletti. It is a part of the HABITRACK project.
