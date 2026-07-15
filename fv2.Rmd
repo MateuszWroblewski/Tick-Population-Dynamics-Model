@@ -1,0 +1,647 @@
+---
+title: "Final version"
+author: "Mateusz Wróblewski"
+date: "2026-07-14"
+output: html_document
+---
+
+## Don't forget to mention ##
+
+Equations have changed
+
+More logistical processes were considered, without much success.
+
+Additional, density related death term was considered, without satisfying outcomes.
+
+Hyperparameter tuning and feature engineering were performed.
+
+Additional compartments were added and removed.
+
+
+# Enviromental Data #
+
+The function we need to estimate the saturation deficit based on the relative humidity.
+
+
+```{r}
+saturation_deficit <- function(x, units="hPa") {
+  temperature <- as.numeric(x["mean_temp_celsius"])
+  relative_humidity <- as.numeric(x["relative_humidity"])
+  #print(temperature)
+  #print(relative_humidity)
+  if (! (is.numeric(temperature) & is.numeric(relative_humidity))) {
+    stop("Both temperature and humidity must have numeric values")
+  }
+  if (relative_humidity < 0 | relative_humidity > 100) {
+    stop("Relative humidity must be between 0 and 100%.")
+  }
+  if (!units %in% c('hPa', 'mmHg')){
+    stop("Wrong units, choose wither hPa or mmHg")
+  }
+  # Tetens equation
+  vapour_pressure <- 6.1078 * exp((17.27 * temperature) / (temperature + 237.3))
+  
+  # Saturation deficit (hPa)
+  sat_defcit <- (1 - relative_humidity / 100) * vapour_pressure
+  
+  if (units=="hPa"){
+    return(sat_defcit)}
+  else {
+    return(sat_defcit*0.75006157584566)
+  }
+  
+  
+}
+```
+
+
+Here we download the temperature data from NASA website
+
+
+```{r}
+library(nasapower)
+library(dplyr)
+
+murbach_hourly <- get_power(
+  community = "ag",
+  pars = c("T2M", "RH2M"),
+  lonlat = c(7.1578, 47.9234),
+  temporal_api = "hourly",
+  dates = c("2001-01-01", "2024-12-31")
+)
+
+colnames(murbach_hourly) <- c(colnames(murbach_hourly)[1:6], c("mean_temp_celsius","relative_humidity"))
+murbach_hourly$saturation_deficit <- apply(X=murbach_hourly, FUN = saturation_deficit, MARGIN=1)
+#print(head(murbach_hourly))
+  
+murbach_final_df <-
+  murbach_hourly %>%
+  mutate(
+    date = as.Date(sprintf("%04d-%02d-%02d", YEAR, MO, DY)),
+    hour = HR
+  ) %>%
+  filter(hour >= 10 & hour <= 17) %>%
+  group_by(date) %>%
+  summarise(
+    mean_temp_celsius = min(mean_temp_celsius, na.rm = TRUE),
+    avg_temp_celsius = mean(mean_temp_celsius, na.rm = TRUE),
+    relative_humidity = mean(relative_humidity, na.rm = TRUE),
+    saturation_deficit=mean(saturation_deficit, na.rm=TRUE),
+    .groups = "drop"
+  )
+
+
+
+rm(murbach_hourly)
+gc()
+```
+
+And we plot to get the idea of the variability.
+
+```{r,fig.width = 12, fig.height = 6}
+library(ggplot2)
+murbach2020 <- murbach_final_df[murbach_final_df["date"]>"2021-01-01" & murbach_final_df["date"]<"2022-12-12",]
+
+ggplot(murbach2020, aes(x = date, y = saturation_deficit
+                   )) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r}
+murbach2020 <- murbach_final_df[murbach_final_df["date"]>"2021-01-01" & murbach_final_df["date"]<"2022-12-12",]
+
+ggplot(murbach2020, aes(x = date, y =relative_humidity
+                   )) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+
+
+# Transition rates #
+
+```{r}
+std_variation <- 8
+dgamma_mode_sd <- function(x, mu, sigma, maxvalue) {
+  if (mu <= 0) stop("mu (mode) must be positive")
+  if (sigma <= 0) stop("sigma must be positive")
+  
+  y <- (mu / sigma + sqrt((mu / sigma)^2 + 4)) / 2
+  shape <- y^2
+  scale <- sigma / y
+  
+  return(maxvalue*dgamma(x, shape = shape, scale = scale)/dgamma(mu, shape = shape, scale = scale))
+}
+
+ovipos_fitted                  <- function(x, mode="temperature"){
+  if (!(mode %in% c("temperature", "saturation_deficit"))){
+    stop("Wrong mode. Choose either mode 'temperature' or 'saturation_deficit'.")
+  }
+  if (mode=="temperature"){
+    return(dgamma_mode_sd(x, 24.4, 8, 0.05))
+    }
+  if (mode=="saturation_deficit")
+  {
+    return(dgamma_mode_sd(x,7.8,4,0.05))
+  }
+}
+
+hatching_fitted                <- function(x,mode="temperature"){
+  if (!(mode %in% c("temperature", "saturation_deficit"))){
+    stop("Wrong mode. Choose either mode 'temperature' or 'saturation_deficit'.")
+  }
+  if (mode=="temperature"){
+    return(dgamma_mode_sd(x, 24.7, 8, 0.05))
+  }
+  if (mode=="saturation_deficit")
+  {
+    #print(x)
+    return(dgamma_mode_sd(x,6.5,4,0.05))
+  }
+}
+
+moulting_larva_to_nymph_fitted <- function(x){
+  return(dgamma_mode_sd(x, 14.2, 6, 0.003))
+}
+
+moulting_nymph_to_adult_fitted <- function(x){
+  return(dgamma_mode_sd(x, 14.2, std_variation, 0.002))
+}
+```
+
+
+A plot for visualisation
+
+```{r}
+library(ggplot2)
+# Generate data
+df <- data.frame(
+  x = seq(0, 40, length.out = 1000)
+)
+
+df$density <- moulting_larva_to_nymph_fitted(df$x)
+
+# Plot
+ggplot(df, aes(x = x, y = density)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_vline(xintercept = 14.2, linetype = "dashed", color = "red") +
+  labs(
+    title = "Oviposition rate",
+    x = "Temperatura",
+    y = "Rate"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+library(ggplot2)
+# Generate data
+df <- data.frame(
+  x = seq(0, 40, length.out = 1000)
+)
+
+active <- function(x){
+  return(1/(1+exp(0.75*(8-x))))
+}
+
+df$density <- active(df$x)
+
+# Plot
+ggplot(df, aes(x = x, y = density)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_vline(xintercept = 6, linetype = "dashed", color = "red") +
+  labs(
+    title = "Oviposition rate",
+    x = "Temperatura",
+    y = "Rate"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+# Parameters #
+
+```{r}
+
+
+#parameter functions
+  
+psi_L <- function(habitat){
+  return(0.2)
+}
+
+psi_N <- function(habitat){
+  return(0.25)
+}
+
+predict_carrying_capacity <- function(mean_yearly_temperature,
+                          mean_yearly_relative_hum,
+                          mean_yearly_sat_def,
+                          elevation,
+                          landcover = c("agriculture", "broad-leafed forest", "coniferous forest", "mixed forest")) {
+
+# coefficirnts from the papper
+  if (!(landcover %in% c("agriculture", "broad-leafed forest", "coniferous forest", "mixed forest"))){
+    stop("Landcover must be one of 'agriculture', 'broad-leafed forest', 'coniferous forest', 'mixed forest'")
+  }
+  beta0 <- 61.8768
+  beta_elevation <- 0.0041
+  beta_temp <- 2.5372
+  beta_rel_hum <- -0.8307
+  beta_sat_def <- -6.5349
+  beta_land_cover <- switch(landcover,
+                    "agriculture" = 0,
+                    "broad-leafed forest" = 0.4321,
+                    "coniferous forest" = -0.5305,
+                    "mixed forest" = 0.1773)
+  predictor <- beta0 +
+    beta_elevation * elevation +
+    beta_temp * mean_yearly_temperature +
+    beta_rel_hum * mean_yearly_relative_hum +
+    beta_sat_def * mean_yearly_sat_def +
+    beta_land_cover
+
+  #print(predictor)
+  #print("components>>>>>>>>>>>>>")
+  #print(beta0)
+  #print(beta_elevation * elevation)
+  #print(beta_rel_hum * mean_yearly_relative_hum)
+  #print(beta_sat_def * mean_yearly_sat_def)
+  #print(beta_land_cover)
+  
+
+  return(exp(predictor))
+}
+```
+
+We take the carrying capacity as more or less twice the expected abundance
+
+```{r}
+average_abundance_model <- 0.522023
+yearly_averages <-murbach_final_df[murbach_final_df["date"]>"2013-01-01" & murbach_final_df["date"]<"2013-12-31",c("avg_temp_celsius", "relative_humidity", "saturation_deficit")] %>% colMeans()
+abundance <- predict_carrying_capacity(mean_yearly_temperature=yearly_averages[1],
+                          mean_yearly_relative_hum=yearly_averages[2],
+                          mean_yearly_sat_def=saturation_deficit(list(mean_temp_celsius=yearly_averages[1], relative_humidity=yearly_averages[2])),
+                          elevation=471,
+                          landcover='mixed forest')
+
+carrying_capacity <- function(habitat) {
+  x <- (as.numeric(100*abundance/average_abundance_model))
+  return (10)
+}
+```
+  
+
+```{r}
+carrying_capacity()
+```
+
+
+# Discrete simulation function #
+
+The main function of the model.
+
+```{r}
+simulate_ticks <- function(initial_state,
+                           temperature_source,
+                           n_days,
+                           parms){
+
+  with(as.list(parms), {
+
+    ## State variables
+    eggs                <- initial_state["eggs"]
+    eggs_hatching       <- initial_state["eggs_hatching"]
+    larvae              <- initial_state["larvae"]
+    infected_nymphs     <- initial_state["infected_nymphs"]
+    susceptible_nymphs  <- initial_state["susceptible_nymphs"]
+    infected_adults     <- initial_state["infected_adults"]
+    susceptible_adults  <- initial_state["susceptible_adults"]
+    engorged_adults     <- initial_state["engorged_adults"]
+
+    ## Storage
+    out <- data.frame(
+      day = 1:n_days,
+      eggs = NA,
+      eggs_hatching=NA,
+      larvae = NA,
+      infected_nymphs = NA,
+      susceptible_nymphs = NA,
+      infected_adults = NA,
+      susceptible_adults = NA,
+      engorged_adults = NA
+    )
+
+    for(day in 1:n_days){
+
+      temperature <- temperature_source[day]
+      sat_deficit <- sat_deficit_source[day]
+      #rel_humidity pomysl - dodaj zaleznosc umierania engorged nimf na podstawie wilgotnosci
+
+      ## Temperature-dependent rates
+      oviposition <- ovipos_fitted(sat_deficit, mode="saturation_deficit")
+      hatch       <- hatching_fitted(temperature, mode="saturation_deficit")
+      hatching_process <- active(temperature)/30
+      moult_LN  <- moulting_larva_to_nymph_fitted(temperature)
+      moult_NA  <- moulting_nymph_to_adult_fitted(temperature)
+      
+
+      
+      ## Flows 
+      #40 dni
+      #50 dni
+      #Przechowajki na lnienie
+
+      eggs_laid <-
+        oviposition *
+        (engorged_adults/2)*
+        2500
+      
+      eggs_started_hatching <- eggs*hatch
+      
+      dead_hatching_eggs <- delta_E*eggs_hatching
+      
+      eggs_hatched <-
+        hatching_process * eggs_hatching
+      #print("temp=")
+      #print(temperature)
+      #print("current eggs and larvae")
+      #print(eggs)
+      #print(larvae)
+      #print("eggs hatched")
+      #print(eggs_hatched)
+
+      eggs_dead <-
+        delta_E * eggs
+
+
+      larvae_dead <-
+        delta_L * larvae
+      
+
+      infected_new_nymphs <-
+        psi_L(habitat) *
+        larvae * moult_LN
+        
+      
+
+      susceptible_new_nymphs <-
+        (1 - psi_L(habitat)) *
+        larvae * moult_LN
+      
+      
+
+      
+      infected_nymphs_to_adults <-
+        moult_NA * infected_nymphs
+
+      susceptible_nymphs_to_adults <-
+        moult_NA * susceptible_nymphs
+
+      infected_adults_from_susceptible <-
+        psi_N(habitat) *
+        susceptible_nymphs_to_adults
+
+      susceptible_adults_from_susceptible <-
+        (1 - psi_N(habitat)) *
+        susceptible_nymphs_to_adults
+
+      adults_dead_I <-
+        delta_A * infected_adults
+
+      adults_dead_S <-
+        delta_A * susceptible_adults
+      
+      newly_engorged_adults_from_sus <- moult_NA*(susceptible_adults)
+      
+      newly_engorged_adults_from_inf <- moult_NA*(infected_adults)
+
+      ## Update compartments
+
+      eggs <-
+        eggs +
+        eggs_laid -
+        eggs_started_hatching -
+        eggs_dead
+      
+      eggs_hatching <- 
+        eggs_hatching + eggs_started_hatching - eggs_hatched# - dead_hatching_eggs
+
+      larvae <-
+        larvae +
+        eggs_hatched -
+        infected_new_nymphs - 
+        susceptible_new_nymphs -
+        larvae_dead
+
+
+      infected_nymphs <-
+        infected_nymphs +
+        infected_new_nymphs*
+        (1 - (susceptible_nymphs + infected_nymphs+infected_new_nymphs+susceptible_new_nymphs) /
+             carrying_capacity(habitat)) -
+        delta_N * infected_nymphs
+      
+      susceptible_nymphs <-
+        susceptible_nymphs +
+        susceptible_new_nymphs*
+        (1 - (susceptible_nymphs + infected_nymphs+infected_new_nymphs+susceptible_new_nymphs) /
+             carrying_capacity(habitat))-
+        delta_N * susceptible_nymphs 
+
+
+      infected_adults <-
+        infected_adults +
+        infected_nymphs_to_adults +
+        infected_adults_from_susceptible -
+        newly_engorged_adults_from_inf-
+        adults_dead_I
+
+      susceptible_adults <-
+        susceptible_adults +
+        susceptible_adults_from_susceptible -
+        newly_engorged_adults_from_sus-
+        adults_dead_S
+      
+      engorged_adults <- 
+        engorged_adults*(1-1/60)+
+        newly_engorged_adults_from_inf+
+        newly_engorged_adults_from_sus
+
+      ## Save results
+      output_line <- c(
+        eggs,
+        eggs_hatching,
+        larvae,
+        infected_nymphs,
+        susceptible_nymphs,
+        infected_adults,
+        susceptible_adults,
+        engorged_adults)
+      
+      #print(output_line)
+      
+      out[day,2:9] <- output_line
+    }
+
+    out
+
+  })
+
+}
+```
+
+
+Here we set the death rates.
+
+```{r}
+delta_E <- 1/365
+```
+
+
+```{r}
+delta_A <- 3/365
+```
+
+
+```{r}
+delta_N<- 4/365
+```
+
+
+
+```{r}
+delta_L<- 4/365
+```
+
+# Simulation #
+
+Here we run the simulation for $N$ days.
+
+
+```{r}
+# Parameters and Initial State
+N <- 20*356
+
+
+
+initial_state <- c(eggs=800,eggs_hatching=200, larvae=100, infected_nymphs=0, susceptible_nymphs=0, infected_adults=0, susceptible_adults=0,engorged_adults=0)
+times <- seq(1, N, by = 1)
+
+
+params_ecotone <- list(habitat="ecotone", psi_L=psi_L, psi_N=psi_N, 
+                       delta_N=delta_N, delta_A=delta_A, delta_E=delta_E, delta_L=delta_L,
+                       temperature_mode="vector.of.values", temperature_source=murbach_final_df$mean_temp_celsius, sat_deficit_source=murbach_final_df$saturation_deficit)
+ 
+                       #delta_N=delta_N, delta_A=delta_A, epsilon=epsilon)
+
+
+# Run simulations
+simulation_output_murbach <- as.data.frame(simulate_ticks(initial_state = initial_state, n_days = N, parms=params_ecotone))
+simulation_output_murbach$Date <- seq(as.Date("2001-01-01"), by = "1 day", length.out = nrow(simulation_output_murbach))
+
+```
+
+```{r}
+average_density <- simulation_output_murbach[simulation_output_murbach["Date"]>"2013-03-01" & simulation_output_murbach["Date"]<"2013-10-31",c("infected_nymphs", "susceptible_nymphs")] %>% colMeans() %>% sum()
+average_density
+```
+
+
+
+
+```{r}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>="2010-01-01" & simulation_output_murbach["Date"]<="2011-12-31",]
+ggplot(data=df2020)+geom_line(aes(x=Date, y=susceptible_nymphs))
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2017-01-01" & simulation_output_murbach["Date"]<"2018-12-12",]
+
+
+ggplot(df2020) +
+  geom_line( aes(x = Date, y = infected_adults
+                   )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2012-01-01" & simulation_output_murbach["Date"]<"2013-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = infected_nymphs
+                   )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2018-01-01" & simulation_output_murbach["Date"]<"2019-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = eggs
+                   )) +
+  geom_line(aes(x = Date, y = eggs_hatching, colour = 'eggs_hatching'
+                   )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2018-01-01" & simulation_output_murbach["Date"]<"2019-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = larvae
+                   )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+
+
+```{r,fig.width = 12, fig.height = 6}
+ggplot(simulation_output_murbach, aes(x = Date, y =infected_adults)) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b"
+  )
+```
+
+
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2018-01-01" & simulation_output_murbach["Date"]<"2019-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = eggs/larvae, colour='eggs/larvae'
+                   )) +
+  geom_line(aes(x = Date, y = larvae/(infected_nymphs+susceptible_nymphs), colour = 'larvae/nymphs'
+                   )) +
+    geom_line(aes(x = Date, y = (infected_nymphs+susceptible_nymphs)/ (infected_adults+susceptible_adults), colour = 'nymphs/adult'
+                   )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
