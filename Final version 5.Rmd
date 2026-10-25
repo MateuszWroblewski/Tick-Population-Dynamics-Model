@@ -1,0 +1,857 @@
+---
+title: "Final version 4"
+author: "Mateusz Wróblewski"
+date: "2026-07-14"
+output: html_document
+---
+
+## Don't forget to mention ##
+
+Equations have changed
+
+More logisitcal processes were considered, without much success
+
+Additional, density related death term was considered, without satisfying outcomes
+
+Hyperparameter tuning and feature engineering were performed
+
+Additional compartments were added and removed
+
+
+# Enviromental Data #
+
+The function we need to estimate the saturation deficit based on the relative humidity.
+
+
+```{r}
+saturation_deficit <- function(x, units="hPa") {
+  temperature <- as.numeric(x["mean_temp_celsius"])
+  relative_humidity <- as.numeric(x["relative_humidity"])
+  #print(temperature)
+  #print(relative_humidity)
+  if (! (is.numeric(temperature) & is.numeric(relative_humidity))) {
+    stop("Both temperature and humidity must have numeric values")
+  }
+  if (relative_humidity < 0 | relative_humidity > 100) {
+    stop("Relative humidity must be between 0 and 100%.")
+  }
+  if (!units %in% c('hPa', 'mmHg')){
+    stop("Wrong units, choose wither hPa or mmHg")
+  }
+  # Tetens equation
+  vapour_pressure <- 6.1078 * exp((17.27 * temperature) / (temperature + 237.3))
+  
+  # Saturtion deficit in hPa
+  sat_defcit <- (1 - relative_humidity / 100) * vapour_pressure
+  
+  if (units=="hPa"){
+    return(sat_defcit)}
+  else {
+    #the alterbative is mmHg
+    return(sat_defcit*0.75006157584566)
+  }
+  
+  
+}
+```
+
+
+Here we download the temperature data from NASA website
+
+
+```{r}
+library(nasapower)
+library(dplyr)
+
+murbach_nasa_data <- nasapower::get_power(
+  community = "ag",                
+  pars      = c("T2M", "RH2M"),              # temperature and relative humidity at 2 meteres 
+  lonlat    = c(7.1578, 47.9234),  # Longitude and Latitude for Murbach
+  temporal_api = "daily",
+  dates = c("2001-01-01", "2024-12-31") 
+)
+
+
+murbach_final_df <- data.frame(
+  date              = as.Date(murbach_nasa_data$YYYYMMDD),
+  mean_temp_celsius = murbach_nasa_data$T2M,
+  relative_humidity = murbach_nasa_data$RH2M
+)
+
+murbach_final_df$saturation_deficit <- apply(X=murbach_final_df, FUN = saturation_deficit, MARGIN=1)
+
+```
+
+
+And we plot to get the idea of the variability.
+
+```{r,fig.width = 12, fig.height = 6}
+library(ggplot2)
+murbach2020 <- murbach_final_df[murbach_final_df["date"]>"2016-01-01" & murbach_final_df["date"]<"2017-12-12",]
+
+ggplot(murbach2020)+geom_line(aes(x = date, y = saturation_deficit, colour="Sat Def"
+)) +
+  geom_line(aes(x = date, y = mean_temp_celsius, colour="Temp"
+  )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r}
+murbach2020 <- murbach_final_df[murbach_final_df["date"]>"2021-01-01" & murbach_final_df["date"]<"2022-12-12",]
+
+ggplot(murbach2020, aes(x = date, y =relative_humidity
+)) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+
+
+# Transition rates #
+
+```{r}
+std_variation <- 8 # the value used in the original paper of KIm et al, but chosen quite arbitrarily imo
+dgamma_mode_sd <- function(x, mu, sigma, maxvalue) {
+  if (mu <= 0) stop("mu (mode) must be positive")
+  if (sigma <= 0) stop("sigma must be positive")
+  
+  y <- (mu / sigma + sqrt((mu / sigma)^2 + 4)) / 2
+  shape <- y^2
+  scale <- sigma / y
+  
+  return(maxvalue*dgamma(x, shape = shape, scale = scale)/dgamma(mu, shape = shape, scale = scale))
+}
+
+ovipos_fitted                  <- function(x, mode="temperature"){
+  if (!(mode %in% c("temperature", "saturation_deficit"))){
+    stop("Wrong mode. Choose either mode 'temperature' or 'saturation_deficit'.")
+  }
+  if (mode=="temperature"){
+    return(dgamma_mode_sd(x, 24.4, 4, 0.05))
+  }
+  if (mode=="saturation_deficit")
+  {
+    return(dgamma_mode_sd(x, 7.8, 4, 0.05))
+  }
+}
+
+hatching_fitted                <- function(x,mode="temperature"){
+  if (!(mode %in% c("temperature", "saturation_deficit"))){
+    stop("Wrong mode. Choose either mode 'temperature' or 'saturation_deficit'.")
+  }
+  if (mode=="temperature"){
+    return(dgamma_mode_sd(x, 24.7,8 , 0.05))
+  }
+  if (mode=="saturation_deficit")
+  {
+    #print(x)
+    return(dgamma_mode_sd(x, 6.5,4,0.05))
+  }
+}
+
+moulting_larva_to_nymph_fitted <- function(x){
+  return(dgamma_mode_sd(x, 14.2, 8, 0.003))
+}
+
+moulting_nymph_to_adult_fitted <- function(x){
+  return(dgamma_mode_sd(x, 14.2, 8, 0.002))
+}
+```
+
+
+A plot for visualisation
+
+```{r}
+library(ggplot2)
+# Generate data
+df <- data.frame(
+  x = seq(0, 40, length.out = 1000)
+)
+
+df$density <- moulting_larva_to_nymph_fitted(df$x)
+
+# Plot
+ggplot(df, aes(x = x, y = density)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_vline(xintercept = 14.2, linetype = "dashed", color = "red") +
+  labs(
+    title = "Oviposition rate",
+    x = "Temperatura",
+    y = "Rate"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+library(ggplot2)
+# Generate data
+df <- data.frame(
+  x = seq(0, 40, length.out = 1000)
+)
+
+active <- function(x){
+  return(1/(1+exp(0.75*(8-x))))
+}
+
+df$density <- active(df$x)
+
+# Plot
+ggplot(df, aes(x = x, y = density)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_vline(xintercept = 6, linetype = "dashed", color = "red") +
+  labs(
+    title = "Oviposition rate",
+    x = "Temperatura",
+    y = "Rate"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+# Parameters #
+
+```{r}
+
+
+#parameter functions
+
+psi_L <- function(habitat){
+  return(0.2)
+}
+
+psi_N <- function(habitat){
+  return(0.25)
+}
+
+
+carrying_capacity <- function(habitat) {
+  return (100)#(as.numeric(abundance/average_abundance_model))
+}
+
+```
+
+
+# Discrete simulation function #
+
+The main function of the model.
+
+```{r}
+simulate_ticks <- function(initial_state,
+                           temperature_source,
+                           n_days,
+                           parms){
+  
+  with(as.list(parms), {
+    
+    # State variables
+    eggs                <- initial_state["eggs"]
+    #eggs_hatching       <- initial_state["eggs_hatching"]
+    larvae              <- initial_state["larvae"]
+    #larvae_diapause     <- initial_state["larvae_diapause"]
+    infected_nymphs     <- initial_state["infected_nymphs"]
+    susceptible_nymphs  <- initial_state["susceptible_nymphs"]
+    infected_adults     <- initial_state["infected_adults"]
+    susceptible_adults  <- initial_state["susceptible_adults"]
+    #engorged_adults     <- initial_state["engorged_adults"]
+    
+    diapause_infected_nymphs <- initial_state["diapause_infected_nymphs"]
+    diapause_susceptible_nymphs <- initial_state["diapause_susceptible_nymphs"]
+    diapause_infected_adults <- initial_state["diapause_infected_adults"]
+    diapause_susceptible_adults <- initial_state["diapause_susceptible_adults"]
+    
+    #simulation output
+    out <- data.frame(
+      day = 1:n_days,
+      eggs = NA,
+      #eggs_hatching=NA,
+      larvae = NA,
+      #larvae_diapause=NA,
+      infected_nymphs = NA,
+      susceptible_nymphs = NA,
+      infected_adults = NA,
+      susceptible_adults = NA,
+      diapause_infected_nymphs = NA,
+      diapause_susceptible_nymphs = NA,
+      diapause_infected_adults = NA,
+      diapause_susceptible_adults = NA
+      #engorged_adults = NA
+    )
+    
+    for(day in 1:n_days){
+      
+      #SUPPROTING VARIABLES
+      
+      year <- floor((day - 1) / 365) + 1
+      day_of_year <- ((day - 1) %% 365) + 1#ensuring it's between 1 and 365
+      
+      fraction_diapause<- if(day_of_year<172) 0 else min(1,(day_of_year-172)/(265-172))
+      #fraction_diapause_larvae <- fraction_diapause
+      fraction_diapause_nymphs <- max_fraction_diapause_nymphs*fraction_diapause
+      fraction_diapause_adults <- max_fraction_diapause_adults*fraction_diapause
+      
+
+      
+      temperature <- temperature_source[day]
+      sat_deficit <- sat_deficit_source[day]
+      
+      
+      diapause_exit <-if(temperature >= spring_temperature & day_of_year <= summer_solstice)
+        max(0,(day_of_year-79)/(172-79)) else 0
+      #rel_humidity pomysl - dodaj zaleznosc umierania engorged nimf na podstawie wilgotnosci
+      
+      ## Temperature-dependent rates
+      oviposition <- ovipos_fitted(temperature, mode="temperature")
+      hatch       <- hatching_fitted(sat_deficit, mode="saturation_deficit")
+      #hatching_process <- active(temperature)/30
+      moult_LN  <- moulting_larva_to_nymph_fitted(temperature)
+      moult_NA  <- moulting_nymph_to_adult_fitted(temperature)
+      
+      
+      
+      ## Flows 
+      #40 dni
+      #50 dni
+      #Przechowajki na lnienie
+      
+      
+      
+      #ONE STEP CHANGES
+      
+      eggs_laid <-
+        oviposition *
+        (infected_adults+susceptible_adults)*(1597/2)#*active(temperature)
+      
+      #eggs_started_hatching <- eggs*hatch
+      
+      #dead_hatching_eggs <- delta_E*eggs_hatching
+      
+      eggs_hatched <-
+        #hatching_process * eggs_hatching
+        hatch*eggs
+      #print("temp=")
+      #print(temperature)
+      #print("current eggs and larvae")
+      #print(eggs)
+      #print(larvae)
+      #print("eggs hatched")
+      #print(eggs_hatched)
+      
+      eggs_dead <-
+        delta_E * eggs
+      
+      
+      larvae_dead <-
+        delta_L * larvae
+      
+      
+      
+
+      
+      #autumn_diapause_larvae <- 
+      #  if(day_of_year >= summer_solstice) fraction_diapause_larvae * eggs_hatched else 0
+      #
+      #larvae_new_questing <- eggs_hatched-autumn_diapause_larvae
+      #
+      #larvae_from_diapause <- diapause_exit *larvae_diapause
+      
+      
+      
+      infected_new_nymphs <-
+        psi_L *
+        larvae * moult_LN#*active(temperature)
+      
+      
+      
+      susceptible_new_nymphs <-
+        (1 - psi_L) *
+        larvae * moult_LN#*active(temperature)
+      
+      
+      autumn_diapause_nymphs <-
+        if(day_of_year > summer_solstice) fraction_diapause_nymphs * infected_new_nymphs else 0
+      
+      
+      autumn_diapause_susceptible_nymphs <-
+        if(day_of_year > summer_solstice) fraction_diapause_nymphs * susceptible_new_nymphs else 0
+      
+      infected_new_nymphs_questing <-
+        infected_new_nymphs -
+        autumn_diapause_nymphs
+      
+      
+      susceptible_new_nymphs_questing <-
+        susceptible_new_nymphs -
+        autumn_diapause_susceptible_nymphs
+      
+      
+      
+      
+      infected_nymphs_from_diapause <-diapause_exit *diapause_infected_nymphs
+      
+      
+      susceptible_nymphs_from_diapause <-diapause_exit *diapause_susceptible_nymphs
+      
+      
+      infected_adults_from_diapause <-diapause_exit *diapause_infected_adults
+      
+      
+      susceptible_adults_from_diapause <-diapause_exit*diapause_susceptible_adults
+      
+      infected_nymphs_to_adults <-
+        moult_NA * infected_nymphs#*active(temperature)
+      
+      susceptible_nymphs_to_adults <-
+        moult_NA * susceptible_nymphs#*active(temperature)
+      
+      infected_adults_from_susceptible <-
+        psi_N *
+        susceptible_nymphs_to_adults
+      
+      susceptible_adults_from_susceptible <-
+        (1 - psi_N) *
+        susceptible_nymphs_to_adults
+      
+      
+      autumn_diapause_adults_I <- if(day_of_year >= summer_solstice) fraction_diapause_adults*(infected_nymphs_to_adults +infected_adults_from_susceptible) else 0
+      
+      
+      autumn_diapause_adults_S <- if(day_of_year >= summer_solstice) fraction_diapause_adults *susceptible_adults_from_susceptible else 0
+      
+      infected_new_adults_questing <- (infected_nymphs_to_adults+infected_adults_from_susceptible)-autumn_diapause_adults_I
+      
+      susceptible_new_adults_questing <- susceptible_adults_from_susceptible-autumn_diapause_adults_S
+      
+      
+      adults_dead_I <-
+        delta_A * infected_adults
+      
+      adults_dead_S <-
+        delta_A * susceptible_adults
+      
+      #newly_engorged_female_adults_from_sus <- 0.5*moult_NA*(susceptible_adults)
+      
+      #newly_engorged_female_adults_from_inf <- 0.5*moult_NA*(infected_adults)
+      
+      #UPDATES TO CMAPRTMENTS
+      
+      
+      
+      eggs <-
+        eggs +
+        eggs_laid -
+        eggs_hatched-
+        eggs_dead
+      
+      larvae <-
+        larvae +
+        (eggs_hatched)*(1-(larvae+eggs_hatched)/carrying_capacity)-#logistic term
+        infected_new_nymphs -
+        susceptible_new_nymphs -
+        larvae_dead
+      
+      #larvae_diapause <- 
+      #  larvae_diapause+
+      #  autumn_diapause_larvae-
+      #  larvae_from_diapause
+      
+      infected_nymphs <-
+        infected_nymphs +
+        (infected_new_nymphs_questing+infected_nymphs_from_diapause) -
+        delta_N * infected_nymphs - 
+        infected_nymphs_to_adults
+      
+      
+      susceptible_nymphs <-
+        susceptible_nymphs +
+        (susceptible_new_nymphs_questing+susceptible_nymphs_from_diapause)-
+        delta_N * susceptible_nymphs -
+        susceptible_nymphs_to_adults
+      
+      diapause_infected_nymphs <-
+        diapause_infected_nymphs +
+        autumn_diapause_nymphs -
+        infected_nymphs_from_diapause-
+        diapause_infected_nymphs/(2*365)
+      
+      diapause_susceptible_nymphs <-
+        diapause_susceptible_nymphs +
+        autumn_diapause_susceptible_nymphs -
+        susceptible_nymphs_from_diapause-
+        diapause_susceptible_nymphs/(2*365)
+      
+      
+      
+      infected_adults <-
+        infected_adults +
+        infected_new_adults_questing+
+        infected_adults_from_diapause -
+        adults_dead_I
+      
+      susceptible_adults <-
+        susceptible_adults +
+        susceptible_new_adults_questing+
+        susceptible_adults_from_diapause-
+        adults_dead_S
+      
+      
+      
+      
+      diapause_infected_adults <-
+        diapause_infected_adults +
+        autumn_diapause_adults_I -
+        infected_adults_from_diapause -
+        diapause_infected_adults/(2*365)
+      
+      diapause_susceptible_adults <-
+        diapause_susceptible_adults +
+        autumn_diapause_adults_S -
+        susceptible_adults_from_diapause-
+        diapause_susceptible_adults/(2*365)
+      
+      
+      
+      output_line <- c(
+        eggs,
+        larvae,
+        #larvae_diapause,
+        infected_nymphs,
+        susceptible_nymphs,
+        infected_adults,
+        susceptible_adults,
+        diapause_infected_nymphs,
+        diapause_susceptible_nymphs,
+        diapause_infected_adults,
+        diapause_susceptible_adults)
+      
+      out[day,2:11] <- output_line
+    }
+    
+    return(out)
+    
+  })
+}
+```
+
+
+Here we set the death rates.
+
+```{r}
+delta_E <- 2/365
+```
+
+
+```{r}
+delta_A <- 3/365
+```
+
+
+```{r}
+delta_N<- 4/365
+```
+
+
+
+```{r}
+delta_L<- 4/365
+```
+
+# Simulation #
+
+Here we run the simulation for $N$ days.
+
+
+```{r}
+# Parameters and Initial State
+N <- 20*356
+
+
+
+#initial_state <- c(eggs=800,eggs_hatching=200, larvae=100, infected_nymphs=0, susceptible_nymphs=0, infected_adults=0, susceptible_adults=0)#,engorged_adults=0)
+initial_state <- c(eggs=100, larvae=10, larvae_diapause=5,infected_nymphs=1, susceptible_nymphs=1, infected_adults=1, susceptible_adults=1,#)#,engorged_adults=0)
+                   diapause_infected_nymphs=0,
+                   diapause_susceptible_nymphs=0,
+                   diapause_infected_adults=0,
+                   diapause_susceptible_adults=0)
+
+
+times <- seq(1, N, by = 1)
+
+
+params_ecotone <- list(habitat="ecotone", psi_L=0.106, psi_N=0.115, 
+                       delta_N=delta_N, delta_A=delta_A, delta_E=delta_E, delta_L=delta_L,
+                       temperature_mode="vector.of.values", temperature_source=murbach_final_df$mean_temp_celsius, sat_deficit_source=murbach_final_df$saturation_deficit,
+                       max_fraction_diapause_nymphs =0.95,
+                       #fraction_diapause_larvae=0.9,
+                       max_fraction_diapause_adults =0.8,
+                       spring_temperature       =7,
+                       summer_solstice          =172,
+                       carrying_capacity=1000
+                       
+                       
+)
+
+#delta_N=delta_N, delta_A=delta_A, epsilon=epsilon)
+
+
+# Run simulations
+simulation_output_murbach <- as.data.frame(simulate_ticks(initial_state = initial_state, n_days = N, parms=params_ecotone))
+simulation_output_murbach$Date <- seq(as.Date("2001-01-01"), by = "1 day", length.out = nrow(simulation_output_murbach))
+
+```
+
+```{r}
+average_density <- simulation_output_murbach[simulation_output_murbach["Date"]>"2013-03-01" & simulation_output_murbach["Date"]<"2013-10-31",c("infected_nymphs", "susceptible_nymphs")] %>% colMeans() %>% sum()
+average_density
+```
+
+
+```{r}
+library(zoo)
+simulation_output_murbach <- merge(x=simulation_output_murbach, y=murbach_final_df, by.x="Date",by.y="date")
+simulation_output_murbach$weekly_temperature <- rollapply(
+  simulation_output_murbach$mean_temp_celsius,
+  width = 15,
+  FUN = mean,
+  fill = NA,
+  align = "center",
+  partial = TRUE
+)
+simulation_output_murbach$activeTicksPercentage <- active(simulation_output_murbach$weekly_temperature)
+```
+
+
+
+
+```{r}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>="2010-01-01" & simulation_output_murbach["Date"]<="2011-12-31",]
+ggplot(data=df2020)+geom_line(aes(x=Date, y=susceptible_nymphs+infected_nymphs))
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- merge(x=simulation_output_murbach[simulation_output_murbach["Date"]>"2014-01-01" & simulation_output_murbach["Date"]<"2016-12-12",], y=murbach_final_df, by.x="Date", by.y="date")
+
+
+ggplot(df2020) +
+  geom_line( aes(x = Date, y = susceptible_nymphs
+  ))+ #+
+  #geom_line(aes(x=Date, y=2e3*moulting_nymph_to_adult_fitted(mean_temp_celsius)))+
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+    
+  )+ theme_minimal()+expand_limits(y=0)
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- merge(x=simulation_output_murbach[simulation_output_murbach["Date"]>"2014-01-01" & simulation_output_murbach["Date"]<"2016-12-12",], y=murbach_final_df, by.x="Date", by.y="date")
+
+
+ggplot(df2020) +
+  geom_line( aes(x = Date, y = susceptible_adults+infected_adults
+  ))+ #+
+  #geom_line(aes(x=Date, y=2e3*moulting_nymph_to_adult_fitted(mean_temp_celsius)))+
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+    
+  )+ theme_minimal()+expand_limits(y=0)
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- merge(x=simulation_output_murbach[simulation_output_murbach["Date"]>"2014-01-01" & simulation_output_murbach["Date"]<"2016-12-12",], y=murbach_final_df, by.x="Date", by.y="date")
+
+
+ggplot(df2020) +
+  geom_line( aes(x = Date, y = eggs
+  ))+ #+
+  #geom_line(aes(x=Date, y=2e3*moulting_nymph_to_adult_fitted(mean_temp_celsius)))+
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+    
+  )+ theme_minimal()+expand_limits(y=0)
+```
+
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- merge(x=simulation_output_murbach[simulation_output_murbach["Date"]>"2010-01-01" & simulation_output_murbach["Date"]<"2011-12-12",], y=murbach_final_df, by.x="Date", by.y="date")
+
+
+ggplot(df2020) +
+  geom_line( aes(x = Date, y = diapause_infected_nymphs, colour="Inf"
+  ))+  geom_line( aes(x = Date, y = diapause_susceptible_nymphs, colour="Sus"
+                      
+  ))+ #+
+  #geom_line(aes(x=Date, y=2e3*moulting_nymph_to_adult_fitted(mean_temp_celsius)))+
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )+ theme_minimal()+expand_limits(y=0)
+
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2010-01-01" & simulation_output_murbach["Date"]<"2015-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = diapause_infected_nymphs
+  )) +
+  
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )+theme_minimal()+expand_limits(y=0)
+
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2018-01-01" & simulation_output_murbach["Date"]<"2019-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = eggs
+  )) +
+  #geom_line(aes(x = Date, y = eggs_hatching, colour = 'eggs_hatching'
+  #                 )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2014-01-01" & simulation_output_murbach["Date"]<"2017-03-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = eggs, colour = 'eggs'
+  )) +
+    geom_line(aes(x = Date, y = larvae, colour='larvae'
+  )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )
+```
+
+
+
+```{r,fig.width = 12, fig.height = 6}
+ggplot(simulation_output_murbach, aes(x = Date, y =infected_adults)) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+ggplot(simulation_output_murbach, aes(x = Date, y =eggs)) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b"
+  )
+```
+
+```{r,fig.width = 12, fig.height = 6}
+ggplot(simulation_output_murbach, aes(x = Date, y =larvae)) +
+  geom_line() +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b"
+  )
+```
+
+
+```{r,fig.width = 12, fig.height = 6}
+df2020 <- simulation_output_murbach[simulation_output_murbach["Date"]>"2013-01-01" & simulation_output_murbach["Date"]<"2015-12-12",]
+
+#options(repr.plot.width=30, repr.plot.height=16)
+ggplot(df2020) +
+  geom_line(aes(x = Date, y = eggs/larvae, colour='eggs/larvae'
+  )) +
+  geom_line(aes(x = Date, y = larvae/(infected_nymphs+susceptible_nymphs), colour = 'larvae/nymphs'
+  )) +
+  geom_line(aes(x = Date, y = (infected_nymphs+susceptible_nymphs)/ (infected_adults+susceptible_adults),colour='nymphs per adult'
+  )) +
+  scale_x_date(
+    date_breaks = "1 month",
+    date_labels = "%b"
+  )+theme_minimal()+labs(y="number of nymphs per adult")
+```
+
+```{r}
+ggplot(data=murbach_final_df[murbach_final_df["date"]<"2003-01-01",])+geom_line(aes(x=date, y=mean_temp_celsius,colour = "temp cels"))+geom_line(aes(x=date, y=saturation_deficit, colour = "sat def"))
+```
+
+```{r}
+ggplot(data=murbach_final_df[murbach_final_df["date"]<"2004-01-01",])+geom_line(aes(x=date, y=saturation_deficit))
+```
+
+# Predicting carrying capacity from expected abundance
+
+
+```{r}
+predict_carrying_capacity <- function(mean_yearly_temperature, #implementation of the formula for tick abundance, used to find the right crrying capacity, after Denise Boehnke et al. I think the input variables are pretty self-explanatory
+                                      mean_yearly_relative_hum,
+                                      mean_yearly_sat_def,
+                                      elevation,
+                                      landcover = c("agriculture", "broad-leafed forest", "coniferous forest", "mixed forest")) {
+  
+  # coefficirnts from the papper
+  if (!(landcover %in% c("agriculture", "broad-leafed forest", "coniferous forest", "mixed forest"))){
+    stop("Landcover must be one of 'agriculture', 'broad-leafed forest', 'coniferous forest', 'mixed forest'")
+  }
+  beta0 <- -0.7546
+  beta_height <- 0.0021
+  beta_temp <- 1.0116
+  beta_rel_hum <- -0.0601
+  beta_sat_def <- -0.6471
+  beta_land_cover <- switch(landcover,
+                            "agriculture" = 0,
+                            "broad-leafed forest" = 0.4321,
+                            "coniferous forest" = -0.5305,
+                            "mixed forest" = 0.1773)
+  predictor <- beta0 +
+    beta_height * elevation +
+    beta_temp * mean_yearly_temperature +
+    beta_rel_hum * mean_yearly_relative_hum +
+    beta_sat_def * mean_yearly_sat_def +
+    beta_land_cover
+  
+  return(exp(predictor))
+}
+```
+
+We take the carrying capacity as more or less twice the expected abundance
+
+```{r}
+average_abundance_current_model_fixed_K <- 67.67
+yearly_averages <-yearly_averages <- murbach_final_df[
+  murbach_final_df$date >= as.Date("2014-01-01") &
+    murbach_final_df$date <= as.Date("2014-12-31"),
+  c("mean_temp_celsius", "relative_humidity", "saturation_deficit")
+] %>% colMeans()
+abundance_preidcted_by_paper <- predict_carrying_capacity(mean_yearly_temperature=yearly_averages[1],
+                          mean_yearly_relative_hum=yearly_averages[2],
+                          mean_yearly_sat_def=yearly_averages[3],
+                          elevation=471,
+                          landcover='mixed forest')
+
+as.numeric(abundance)
+predicted_scaled_carrying_capacity <- as.numeric(abundance_preidcted_by_paper*carrying_capacity(habitat ="mixed forest")/average_abundance_current_model_fixed_K)
+predicted_scaled_carrying_capacity
+```
+
+Thus, we may wish to change carrying capacity to ~60 for this town
+
+
+
+
